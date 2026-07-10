@@ -1,5 +1,22 @@
+"""
+Fetch Elastic Security alerts, investigate each one, and write a
+combined SOC report to disk.
+
+Console output is intentionally minimal:
+  - progress lines
+  - errors only when an alert fails
+  - final saved report paths
+"""
+
 from elastic_client import es
 from enrichment import enrich_alert
+from investigation import investigate_alert
+from timeline import build_timeline
+from scoring import calculate_risk_score
+from mitre import map_mitre
+from llm_summary import summarize_alert
+from report import generate_soc_report, save_combined_report
+from config import SAVE_REPORTS, REPORTS_DIR
 
 response = es.search(
     index=".internal.alerts-security.alerts-default-000001",
@@ -14,140 +31,72 @@ response = es.search(
 )
 
 hits = response["hits"]["hits"]
+total = len(hits)
 
-print(f"\nFound {len(hits)} alerts\n")
+print(f"Found {total} alerts. Analyzing...")
 
-for alert in hits:
+all_reports = []
+failures = 0
 
+for index, alert in enumerate(hits, start=1):
     src = alert["_source"]
+    rule = src.get("kibana.alert.rule.name") or "Unknown Rule"
 
-    enrichment = enrich_alert(src)
-
-    rule = src.get("kibana.alert.rule.name")
-
-    severity = (
-        src.get("kibana.alert.severity")
-        or src.get("kibana.alert.rule.severity")
-    )
-
-    reason = src.get("kibana.alert.reason")
-
-    timestamp = src.get("@timestamp")
-
-    host = (
-        src.get("host.name")
-        or src.get("host", {}).get("name")
-    )
-
-    user = (
-        src.get("user.name")
-        or src.get("user", {}).get("name")
-    )
-
-    process = (
-        src.get("process.name")
-        or src.get("process", {}).get("name")
-    )
-
-    command = (
-        src.get("process.command_line")
-        or src.get("process", {}).get("command_line")
-    )
-
-    source_ip = (
-        src.get("source.ip")
-        or src.get("source", {}).get("ip")
-    )
-
-    destination_ip = (
-        src.get("destination.ip")
-        or src.get("destination", {}).get("ip")
-    )
-
-    print("=" * 100)
-
-    print(f"Rule          : {rule}")
-    print(f"Severity      : {severity}")
-    print(f"Reason        : {reason}")
-    print(f"Host          : {host}")
-    print(f"User          : {user}")
-    print(f"Process       : {process}")
-    print(f"Command Line  : {command}")
-    print(f"Source IP     : {source_ip}")
-    print(f"Destination IP: {destination_ip}")
-    print(f"Timestamp     : {timestamp}")
-
-    print("\nThreat Intelligence")
-    print("-" * 60)
-
-    # ---------------- VirusTotal ----------------
-
-    vt = enrichment["virustotal"]
-
-    if vt:
-        try:
-            stats = vt["data"]["attributes"]["last_analysis_stats"]
-
-            print(
-                f"VirusTotal    : "
-                f"{stats['malicious']} malicious | "
-                f"{stats['suspicious']} suspicious"
-            )
-
-        except Exception:
-            print("VirusTotal    : Data Available")
-
-    else:
-        print("VirusTotal    : No data")
-
-    # ---------------- AbuseIPDB ----------------
-
-    abuse = enrichment["abuseipdb"]
-
-    if abuse:
-        try:
-            score = abuse["data"]["abuseConfidenceScore"]
-
-            print(
-                f"AbuseIPDB     : "
-                f"{score}% Abuse Confidence"
-            )
-
-        except Exception:
-            print("AbuseIPDB     : Data Available")
-
-    else:
-        print("AbuseIPDB     : No data")
-
-    # ---------------- Shodan ----------------
-
-    shodan = enrichment["shodan"]
-
-    if shodan:
-
+    try:
+        enrichment = enrich_alert(src)
+        investigation = investigate_alert(src)
+        timeline = build_timeline(src, investigation)
+        risk = calculate_risk_score(src, enrichment, investigation)
+        mitre = map_mitre(
+            src, enrichment, investigation, risk=risk
+        )
+        summary = summarize_alert(
+            src,
+            enrichment,
+            investigation,
+            risk=risk,
+            mitre=mitre,
+            timeline=timeline,
+        )
+        report = generate_soc_report(
+            src,
+            enrichment,
+            investigation,
+            summary,
+            timeline=timeline,
+            risk=risk,
+            mitre=mitre,
+        )
+        all_reports.append(report)
         print(
-            f"Organization  : {shodan.get('org')}"
+            f"[{index}/{total}] OK  {rule}  "
+            f"risk={risk.get('risk_score_label')} "
+            f"({risk.get('overall_risk')})"
         )
 
-        print(
-            f"Operating Sys : {shodan.get('os')}"
-        )
+    except Exception as exc:
+        failures += 1
+        print(f"[{index}/{total}] FAIL  {rule}")
+        print(f"         Error: {exc}")
 
-        print(
-            f"Country       : {shodan.get('country_name')}"
-        )
+if not all_reports:
+    print("No reports generated. Fix the errors above and re-run.")
+    raise SystemExit(1)
 
-    else:
-
-        print("Shodan        : No data")
-
-    # ---------------- Hybrid Analysis ----------------
-
-    hybrid = enrichment["hybrid_analysis"]
-
-    if hybrid:
-        print("HybridAnalysis: Sample Found")
-    else:
-        print("HybridAnalysis: No data")
-
+if SAVE_REPORTS:
+    saved_paths = save_combined_report(
+        all_reports,
+        output_dir=REPORTS_DIR,
+    )
     print()
+    print("Combined SOC report saved:")
+    print(f"  Markdown : {saved_paths['markdown']}")
+    print(f"  JSON     : {saved_paths['json']}")
+    print(f"  Alerts   : {len(all_reports)}")
+    if failures:
+        print(f"  Failed   : {failures}")
+else:
+    print(
+        f"Processed {len(all_reports)} alerts "
+        "(SAVE_REPORTS=false, nothing written)."
+    )
