@@ -272,8 +272,11 @@ def render_alert_section(report, alert_number):
         summary.get("executive_summary") or "No summary available.",
         "",
         f"- **Disposition:** {summary.get('disposition')}",
-        f"- **Overall Risk:** {risk.get('overall_risk')} "
+        f"- **Elastic Detection Severity:** "
+        f"{risk.get('elastic_detection_severity') or alert.get('severity')}",
+        f"- **Analyst Risk Assessment:** {risk.get('overall_risk')} "
         f"({risk.get('risk_score_label')})",
+        f"- **Evidence Confidence:** {risk.get('evidence_confidence')}",
         f"- **Recommendation:** {risk.get('recommendation')}",
         "",
         "## Alert Overview",
@@ -291,14 +294,36 @@ def render_alert_section(report, alert_number):
         "",
         "## Risk Score",
         "",
-        f"- **Elastic Severity:** {risk.get('elastic_severity')}",
-        f"- **Computed Risk Score:** {risk.get('risk_score_label')}",
-        f"- **Overall Risk:** {risk.get('overall_risk')}",
+        f"- **Elastic Detection Severity:** "
+        f"{risk.get('elastic_detection_severity') or risk.get('elastic_severity')}",
+        f"- **Analyst Risk Assessment:** {risk.get('overall_risk')} "
+        f"(Score: {risk.get('risk_score_label')})",
+        f"- **Alert Context:** "
+        f"{(risk.get('alert_context') or '-').replace('_', ' ')}",
+        f"- **Evidence Confidence:** {risk.get('evidence_confidence')}",
         f"- **Recommendation:** {risk.get('recommendation')}",
         "",
-        "### Score Reasons",
+        "### Reason for Difference",
+        "",
+        risk.get("reason_for_difference")
+        or risk.get("analyst_rationale")
+        or "No material difference explained.",
         "",
     ]
+
+    if risk.get("divergence_reasons"):
+        lines.extend([
+            "### Assessment Details",
+            "",
+        ])
+        for reason in risk.get("divergence_reasons") or []:
+            lines.append(f"- {reason}")
+        lines.append("")
+
+    lines.extend([
+        "### Score Factors",
+        "",
+    ])
 
     for reason in risk.get("reasons") or []:
         lines.append(f"- ✔ {reason}")
@@ -807,9 +832,22 @@ def _render_alert_html(report, alert_number):
 
     overview = _kv_table([
         ("Rule", _html_esc(alert.get("rule"))),
-        ("Elastic Severity", _badge(elastic_sev)),
-        ("Overall Risk", _badge(overall)),
-        ("Risk Score", _html_esc(risk.get("risk_score_label"))),
+        ("Elastic Detection Severity", _badge(elastic_sev)),
+        (
+            "Analyst Risk Assessment",
+            f"{_badge(overall)} "
+            f"({_html_esc(risk.get('risk_score_label'))})",
+        ),
+        (
+            "Alert Context",
+            _html_esc(
+                (risk.get("alert_context") or "-").replace("_", " ")
+            ),
+        ),
+        (
+            "Evidence Confidence",
+            _html_esc(risk.get("evidence_confidence") or "-"),
+        ),
         ("Recommendation", _html_esc(risk.get("recommendation"))),
         ("Disposition", _badge(disposition)),
         ("Timestamp", _html_esc(alert.get("timestamp"))),
@@ -833,6 +871,21 @@ def _render_alert_html(report, alert_number):
     score_reasons = "".join(
         f"<li>{_html_esc(r)}</li>" for r in (risk.get("reasons") or [])
     ) or "<li class='muted'>No reasons</li>"
+
+    divergence = "".join(
+        f"<li>{_html_esc(r)}</li>"
+        for r in (risk.get("divergence_reasons") or [])
+    )
+    divergence_html = (
+        "<h3>Reason for Difference</h3>"
+        f"<p>{_html_esc(risk.get('reason_for_difference') or risk.get('analyst_rationale') or '-')}</p>"
+        + (
+            "<h3>Assessment Details</h3>"
+            f"<ul class='clean'>{divergence}</ul>"
+            if divergence
+            else ""
+        )
+    )
 
     mitre_rows = []
     for item in mitre.get("techniques") or []:
@@ -1032,18 +1085,34 @@ def _render_alert_html(report, alert_number):
         _section(
             "Risk Score",
             _kv_table([
-                ("Elastic Severity", _badge(elastic_sev)),
                 (
-                    "Computed Score",
-                    _html_esc(risk.get("risk_score_label")),
+                    "Elastic Detection Severity",
+                    _badge(elastic_sev),
                 ),
-                ("Overall Risk", _badge(overall)),
+                (
+                    "Analyst Risk Assessment",
+                    f"{_badge(overall)} "
+                    f"({_html_esc(risk.get('risk_score_label'))})",
+                ),
+                (
+                    "Alert Context",
+                    _html_esc(
+                        (risk.get("alert_context") or "-").replace(
+                            "_", " "
+                        )
+                    ),
+                ),
+                (
+                    "Evidence Confidence",
+                    _html_esc(risk.get("evidence_confidence") or "-"),
+                ),
                 (
                     "Recommendation",
                     _html_esc(risk.get("recommendation")),
                 ),
             ])
-            + "<h3>Score Reasons</h3>"
+            + divergence_html
+            + "<h3>Score Factors</h3>"
             + f"<ul class='clean'>{score_reasons}</ul>",
         ),
         _section("MITRE ATT&CK", mitre_table),

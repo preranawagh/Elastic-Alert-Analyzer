@@ -130,7 +130,37 @@ def build_summary_context(
             "url": iocs.get("url"),
         },
         "threat_intelligence": ti,
-        "risk": risk or {},
+        "risk": {
+            **(risk or {}),
+            "elastic_severity": (risk or {}).get("elastic_severity"),
+            "elastic_detection_severity": (risk or {}).get(
+                "elastic_detection_severity"
+            ),
+            "overall_risk": (risk or {}).get("overall_risk"),
+            "analyst_risk_assessment": (risk or {}).get(
+                "analyst_risk_assessment"
+            ),
+            "risk_score_label": (risk or {}).get("risk_score_label"),
+            "risk_delta_label": (risk or {}).get("risk_delta_label"),
+            "evidence_confidence": (risk or {}).get(
+                "evidence_confidence"
+            ),
+            "alert_context": (risk or {}).get("alert_context"),
+            "reason_for_difference": (risk or {}).get(
+                "reason_for_difference"
+            ),
+            "analyst_rationale": (risk or {}).get("analyst_rationale"),
+            "divergence_reasons": (risk or {}).get(
+                "divergence_reasons"
+            ) or [],
+            "clean_developer_workflow": (risk or {}).get(
+                "clean_developer_workflow"
+            ),
+            "process_chain": (risk or {}).get("process_chain"),
+            "strong_malicious_override": (risk or {}).get(
+                "strong_malicious_override"
+            ),
+        },
         "mitre": mitre or {},
         "timeline_preview": _trim_list(
             (timeline or {}).get("events"), 12
@@ -307,6 +337,17 @@ def _dynamic_recommendations(context, disposition):
                 "lab against known-good binaries before deploying."
             )
 
+    if (context.get("risk") or {}).get("clean_developer_workflow"):
+        actions = [
+            "No escalation required for allowlisted developer workflow "
+            "unless new malicious IOC or persistence appears.",
+            "If this detection is noisy, tune the Elastic rule or add "
+            "an exception for the trusted IDE/toolchain parent with "
+            "change control.",
+            "Spot-check command lines for encoded PowerShell, download "
+            "cradles, or unexpected persistence as a sanity check.",
+        ]
+
     if disposition in ("suspicious", "malicious"):
         actions.extend([
             "Consider host isolation if active compromise is confirmed.",
@@ -333,7 +374,7 @@ def _dynamic_recommendations(context, disposition):
 def rule_based_summary(context):
     """
     Narrative fallback when no LLM key is configured.
-    Still produces analyst-style prose + dynamic actions.
+    Explicitly explains why our risk differs from Elastic.
     """
     alert = context.get("alert") or {}
     ti = context.get("threat_intelligence") or {}
@@ -345,6 +386,13 @@ def rule_based_summary(context):
     parent = (inv.get("parent_process") or {}).get("name")
     host = alert.get("host") or "unknown host"
     user = alert.get("user") or "unknown user"
+    chain = (
+        risk.get("process_chain")
+        or " → ".join(
+            [p for p in [parent, process] if p]
+        )
+        or process
+    )
 
     findings = []
     risk_level = (risk.get("overall_risk") or "low").lower()
@@ -352,70 +400,50 @@ def rule_based_summary(context):
         risk_level = "low"
     disposition = "likely_benign"
 
-    chain = []
-    if parent:
-        chain.append(str(parent))
-    chain.append(str(process))
-    for child in inv.get("child_processes") or []:
-        if isinstance(child, dict) and child.get("name"):
-            chain.append(str(child.get("name")))
-            if len(chain) >= 4:
-                break
+    elastic = (
+        risk.get("elastic_detection_severity")
+        or risk.get("elastic_severity")
+        or alert.get("severity")
+        or "unknown"
+    )
+    score_label = risk.get("risk_score_label") or "?"
+    confidence = risk.get("evidence_confidence") or "Low"
+    rationale = (
+        risk.get("reason_for_difference")
+        or risk.get("analyst_rationale")
+        or ""
+    )
+    context_name = (risk.get("alert_context") or "unknown").replace(
+        "_", " "
+    )
 
-    if len(chain) > 1:
+    # Lead with Elastic vs our score explanation (required)
+    if risk.get("clean_developer_workflow"):
         findings.append(
-            f"Process chain: {' → '.join(chain)}."
+            f"Developer workflow detected ({chain}). "
+            "This activity is consistent with normal software "
+            "development and is unlikely to represent malicious behavior."
         )
+        disposition = "likely_benign"
+        risk_level = "low"
+    elif rationale:
+        findings.append(rationale)
     else:
         findings.append(
-            f"Alert '{alert.get('rule')}' fired for {process} "
-            f"on host {host} under user {user}."
+            f"Alert '{alert.get('rule')}' on host {host} under "
+            f"user {user} (process chain: {chain})."
         )
 
-    if parent:
-        findings.append(
-            f"{parent} launched {process} on {host}."
-        )
-
-    children = inv.get("child_process_count") or 0
-    if children:
-        findings.append(
-            f"{children} child process(es) were created after the alert."
-        )
-        disposition = "insufficient_data"
-
-    files = (
-        _safe_len(inv.get("file_creations"))
-        + _safe_len(inv.get("file_modifications"))
-    )
-    if files:
-        findings.append(
-            f"{files} file create/modify event(s) were observed."
-        )
-
+    # Only treat persistence / TI as escalation drivers
     if persistence.get("registry_count"):
         findings.append("Registry persistence indicators were observed.")
         disposition = "suspicious"
     if persistence.get("scheduled_tasks_count"):
         findings.append("Scheduled task persistence activity was observed.")
         disposition = "suspicious"
-    if persistence.get("services_count"):
-        findings.append("Service persistence activity was observed.")
-        disposition = "suspicious"
-    if persistence.get("startup_folder_count"):
-        findings.append("Startup folder file activity was observed.")
-        disposition = "suspicious"
     if persistence.get("wmi_count"):
         findings.append("WMI persistence indicators were observed.")
         disposition = "suspicious"
-
-    network = _safe_len(inv.get("network_connections"))
-    dns = _safe_len(inv.get("dns_events"))
-    if network or dns:
-        findings.append(
-            f"Network/DNS activity observed "
-            f"({network} connection(s), {dns} DNS event(s))."
-        )
 
     vt = ti.get("virustotal")
     if isinstance(vt, dict) and (
@@ -427,12 +455,14 @@ def rule_based_summary(context):
             f"{vt.get('suspicious')} suspicious)."
         )
         disposition = "suspicious"
-        risk_level = "high"
+        if (vt.get("malicious") or 0) >= 5:
+            disposition = "malicious"
+            risk_level = "high"
 
     abuse = ti.get("abuseipdb")
     if isinstance(abuse, dict) and abuse.get(
         "abuseConfidenceScore", 0
-    ) >= 50:
+    ) >= 75:
         findings.append(
             f"AbuseIPDB confidence "
             f"{abuse.get('abuseConfidenceScore')}%."
@@ -440,62 +470,53 @@ def rule_based_summary(context):
         disposition = "suspicious"
         risk_level = "high"
 
-    history = context.get("historical_correlation") or {}
-    if history.get("match_count"):
-        findings.append(
-            f"Historical correlation: {history.get('summary')}."
-        )
+    # Prefer scorer's overall risk when available
+    if risk.get("overall_risk"):
+        mapped = str(risk.get("overall_risk")).lower()
+        if mapped == "informational":
+            mapped = "low"
+        risk_level = mapped
+
+    if risk.get("strong_malicious_override"):
         if disposition == "likely_benign":
             disposition = "suspicious"
-            if risk_level == "low":
-                risk_level = "medium"
 
-    yara = context.get("yara_suggestions") or {}
-    if yara.get("applicable"):
-        findings.append(
-            "YARA scanning is recommended for this malware/file-"
-            "related alert."
-        )
-
-    if not any([
-        children, files, network, dns,
-        persistence.get("registry_count"),
-        persistence.get("services_count"),
-        persistence.get("scheduled_tasks_count"),
-        persistence.get("startup_folder_count"),
-        persistence.get("wmi_count"),
-        isinstance(vt, dict) and (
-            vt.get("malicious") or vt.get("suspicious")
-        ),
-        history.get("match_count"),
-    ]):
-        findings.append(
-            "No strong supporting telemetry for persistence, "
-            "malicious reputation, or suspicious network activity "
-            "was found in the investigation window. This may be "
-            "consistent with expected user/developer activity."
-        )
+    if risk.get("clean_developer_workflow"):
         disposition = "likely_benign"
-        risk_level = "low"
 
-    # Narrative paragraph
-    narrative = (
-        f"The alert indicates that {process} executed on host {host} "
-        f"under user {user}"
-        + (f", spawned by {parent}" if parent else "")
-        + ". "
-        + " ".join(findings[1:] if len(findings) > 1 else findings)
-        + f" Overall assessed risk is {risk_level.upper()} with "
-        f"disposition '{disposition}'."
+    # Build explicit Elastic-vs-ours paragraph
+    if rationale:
+        narrative = rationale + f" Disposition: {disposition}."
+    elif risk.get("clean_developer_workflow"):
+        narrative = (
+            f"Elastic Detection Severity: {elastic}. "
+            f"Analyst Risk Assessment: LOW ({score_label}, "
+            f"confidence {confidence}). Developer workflow "
+            f"({chain}) with clean TI and no persistence. "
+            f"Disposition: likely_benign."
+        )
+    else:
+        narrative = (
+            f"Elastic Detection Severity: {elastic}. "
+            f"Analyst Risk Assessment: {risk_level.upper()} "
+            f"({score_label}, confidence {confidence}, "
+            f"context={context_name}). "
+            f"Process chain: {chain}. Disposition: {disposition}."
+        )
+
+    # Key findings should include divergence bullets
+    key_findings = _dedupe_findings(
+        findings
+        + list((risk.get("divergence_reasons") or [])[:5])
     )
 
     return {
         "provider": "rule_based",
         "model": None,
-        "executive_summary": narrative,
+        "executive_summary": " ".join(narrative.split()),
         "risk_level": risk_level,
         "disposition": disposition,
-        "key_findings": findings,
+        "key_findings": key_findings,
         "recommended_actions": _dynamic_recommendations(
             context, disposition
         ),
@@ -503,19 +524,38 @@ def rule_based_summary(context):
     }
 
 
+def _dedupe_findings(items):
+    out, seen = [], set()
+    for item in items:
+        if not item:
+            continue
+        key = str(item).strip()
+        if key and key not in seen:
+            out.append(key)
+            seen.add(key)
+    return out
+
+
 def _call_openai(context):
     if not OPENAI_API_KEY:
         return None
 
     system_prompt = (
-        "You are a senior SOC analyst writing an incident assessment. "
+        "You are a senior Tier-2 SOC analyst writing an incident assessment. "
         "Use only the provided alert, threat intelligence, process tree, "
-        "timeline, MITRE mapping, and investigation evidence. "
-        "Write a natural-language executive summary of 3-6 sentences "
-        "that explains what happened, what was NOT observed if relevant, "
-        "and confidence. Be specific about process lineage. "
-        "Recommended actions must be dynamic and tied to the evidence "
-        "(e.g. if Run key persistence exists, say inspect/remove Run key). "
+        "timeline, MITRE mapping, risk scoring rationale, and investigation "
+        "evidence. "
+        "The executive_summary MUST explicitly explain why our risk score "
+        "differs from (or aligns with) Elastic severity — never only state "
+        "the score. "
+        "If risk.clean_developer_workflow is true, say the activity is "
+        "consistent with normal software development and unlikely malicious. "
+        "If risk.strong_malicious_override is true, cite the independent "
+        "evidence (VT, persistence, encoded PowerShell, etc.). "
+        "Do NOT treat child processes, file creation counts, or IDE tooling "
+        "alone as malicious. "
+        "Write 3-6 sentences. Be specific about process lineage. "
+        "Recommended actions must be dynamic and tied to the evidence. "
         "Respond ONLY with valid JSON keys: "
         "executive_summary (string), "
         "risk_level (low|medium|high|critical), "

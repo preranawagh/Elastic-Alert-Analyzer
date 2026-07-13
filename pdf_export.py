@@ -463,12 +463,46 @@ def build_pdf_report(reports, output_path, generated_at=None):
             story.extend(section(
                 "Risk Score",
                 kv_table([
-                    ("Elastic Severity", badge_flowable(elastic_sev)),
-                    ("Computed Score", risk.get("risk_score_label")),
-                    ("Overall Risk", badge_flowable(overall)),
+                    (
+                        "Elastic Detection Severity",
+                        badge_flowable(elastic_sev),
+                    ),
+                    (
+                        "Analyst Risk Assessment",
+                        f"{overall} ({risk.get('risk_score_label')})",
+                    ),
+                    (
+                        "Alert Context",
+                        (risk.get("alert_context") or "-").replace(
+                            "_", " "
+                        ),
+                    ),
+                    (
+                        "Evidence Confidence",
+                        risk.get("evidence_confidence"),
+                    ),
                     ("Recommendation", risk.get("recommendation")),
                 ]),
-                Paragraph("Score Reasons", styles["SubHead"]),
+                Paragraph("Reason for Difference", styles["SubHead"]),
+                P(
+                    risk.get("reason_for_difference")
+                    or risk.get("analyst_rationale")
+                    or "-"
+                ),
+                *(
+                    [
+                        Paragraph(
+                            "Assessment Details",
+                            styles["SubHead"],
+                        ),
+                        bullet_list(
+                            risk.get("divergence_reasons") or []
+                        ),
+                    ]
+                    if risk.get("divergence_reasons")
+                    else []
+                ),
+                Paragraph("Score Factors", styles["SubHead"]),
                 bullet_list(risk.get("reasons") or []),
             ))
 

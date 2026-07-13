@@ -56,11 +56,13 @@ for index, alert in enumerate(hits, start=1):
             lookback_days=HISTORY_LOOKBACK_DAYS,
         )
         timeline = build_timeline(src, investigation)
+        mitre = map_mitre(src, enrichment, investigation)
         risk = calculate_risk_score(
-            src, enrichment, investigation, history=history
-        )
-        mitre = map_mitre(
-            src, enrichment, investigation, risk=risk
+            src,
+            enrichment,
+            investigation,
+            history=history,
+            mitre=mitre,
         )
         summary = summarize_alert(
             src,
@@ -92,7 +94,8 @@ for index, alert in enumerate(hits, start=1):
         print(
             f"[{index}/{total}] OK  {rule}  "
             f"risk={risk.get('risk_score_label')} "
-            f"({risk.get('overall_risk')})"
+            f"({risk.get('overall_risk')}, "
+            f"conf={risk.get('evidence_confidence')})"
         )
 
     except Exception as exc:
