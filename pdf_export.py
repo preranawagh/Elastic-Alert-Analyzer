@@ -399,6 +399,8 @@ def build_pdf_report(reports, output_path, generated_at=None):
             persistence = inv.get("persistence") or {}
             mitre = report.get("mitre") or {}
             timeline = report.get("timeline") or {}
+            yara = report.get("yara_suggestions") or {}
+            history = report.get("historical_correlation") or {}
             tree_obj = inv.get("process_tree") or {}
             tree = tree_obj.get("display_ascii")
             if not tree:
@@ -557,6 +559,101 @@ def build_pdf_report(reports, output_path, generated_at=None):
                     ("Private IPs", iocs.get("private_ips")),
                 ]),
             ))
+
+            history_rows = [
+                [
+                    match.get("matched_on"),
+                    _plain(match.get("timestamp"), 40),
+                    _plain(match.get("rule"), 60),
+                    match.get("host"),
+                    match.get("user"),
+                    match.get("overall_risk"),
+                ]
+                for match in (history.get("matches") or [])[:12]
+            ]
+            story.extend(section(
+                "Historical Correlation",
+                P(history.get("summary") or "No matches"),
+                P(
+                    f"Lookback: {history.get('lookback_days')} day(s) · "
+                    f"Matches: {history.get('match_count', 0)}",
+                    "Muted",
+                ),
+                data_table(
+                    [
+                        "Matched On",
+                        "Timestamp",
+                        "Rule",
+                        "Host",
+                        "User",
+                        "Risk",
+                    ],
+                    history_rows,
+                    widths=[
+                        usable * 0.14,
+                        usable * 0.18,
+                        usable * 0.28,
+                        usable * 0.16,
+                        usable * 0.12,
+                        usable * 0.12,
+                    ],
+                ),
+            ))
+
+            yara_blocks = []
+            if yara.get("applicable"):
+                yara_blocks.append(
+                    P(yara.get("note") or "YARA recommended")
+                )
+                if yara.get("reasons"):
+                    yara_blocks.append(
+                        Paragraph("Evidence", styles["SubHead"])
+                    )
+                    yara_blocks.append(
+                        bullet_list(yara.get("reasons") or [])
+                    )
+                yara_blocks.append(
+                    Paragraph(
+                        "Recommended actions", styles["SubHead"]
+                    )
+                )
+                yara_blocks.append(
+                    bullet_list(yara.get("recommendations") or [])
+                )
+                draft_rules = (
+                    yara.get("draft_rules")
+                    or yara.get("suggestions")
+                    or []
+                )
+                if draft_rules:
+                    yara_blocks.append(
+                        Paragraph(
+                            "Optional draft rule "
+                            "(validate in lab)",
+                            styles["SubHead"],
+                        )
+                    )
+                    for item in draft_rules:
+                        yara_blocks.append(
+                            Paragraph(
+                                _esc(item.get("name")),
+                                styles["SubHead"],
+                            )
+                        )
+                        yara_blocks.append(
+                            P(item.get("rationale") or "", "Muted")
+                        )
+                        yara_blocks.append(
+                            Preformatted(
+                                _plain(item.get("rule"), 4000),
+                                styles["TreePre"],
+                                maxLineLength=95,
+                            )
+                        )
+                story.extend(section(
+                    "YARA Recommendation",
+                    *yara_blocks,
+                ))
 
             story.extend(section(
                 "Investigation Findings",

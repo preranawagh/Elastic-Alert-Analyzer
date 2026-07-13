@@ -157,7 +157,9 @@ def _overall_label(score):
     return "INFORMATIONAL"
 
 
-def calculate_risk_score(alert, enrichment, investigation):
+def calculate_risk_score(
+    alert, enrichment, investigation, history=None
+):
     """
     Produce a 0-100 risk score with checklist reasons and
     a priority recommendation.
@@ -272,6 +274,29 @@ def calculate_risk_score(alert, enrichment, investigation):
     if auth:
         score += min(8, 2 + auth)
         reasons.append(f"Authentication events ({auth})")
+
+    history = history or {}
+    by_type = history.get("by_type") or {}
+    if by_type.get("hash"):
+        score += 15
+        reasons.append(
+            f"Historical hash match "
+            f"({len(by_type['hash'])} prior)"
+        )
+        breakdown["history_hash_matches"] = len(by_type["hash"])
+    if by_type.get("ip"):
+        score += 8
+        reasons.append(
+            f"Historical IP match ({len(by_type['ip'])} prior)"
+        )
+        breakdown["history_ip_matches"] = len(by_type["ip"])
+    if len(by_type.get("user") or []) >= 2:
+        score += 5
+        reasons.append(
+            f"Repeat user in history "
+            f"({len(by_type['user'])} prior)"
+        )
+        breakdown["history_user_matches"] = len(by_type["user"])
 
     deduped = []
     seen = set()

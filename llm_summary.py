@@ -41,6 +41,8 @@ def build_summary_context(
     risk=None,
     mitre=None,
     timeline=None,
+    history=None,
+    yara=None,
 ):
     """Compact JSON-friendly context for the LLM / rule engine."""
     iocs = (enrichment or {}).get("iocs") or {}
@@ -184,6 +186,41 @@ def build_summary_context(
                 inv.get("related_events")
             ),
         },
+        "historical_correlation": {
+            "summary": (history or {}).get("summary"),
+            "match_count": (history or {}).get("match_count", 0),
+            "by_type_counts": {
+                "hash": len(
+                    ((history or {}).get("by_type") or {}).get(
+                        "hash"
+                    )
+                    or []
+                ),
+                "ip": len(
+                    ((history or {}).get("by_type") or {}).get("ip")
+                    or []
+                ),
+                "user": len(
+                    ((history or {}).get("by_type") or {}).get(
+                        "user"
+                    )
+                    or []
+                ),
+            },
+        },
+        "yara_suggestions": {
+            "applicable": bool((yara or {}).get("applicable")),
+            "strength": (yara or {}).get("strength") or "none",
+            "reasons": ((yara or {}).get("reasons") or [])[:5],
+            "recommendation_count": len(
+                (yara or {}).get("recommendations") or []
+            ),
+            "draft_rule_count": len(
+                (yara or {}).get("draft_rules")
+                or (yara or {}).get("suggestions")
+                or []
+            ),
+        },
     }
 
 
@@ -249,6 +286,26 @@ def _dynamic_recommendations(context, disposition):
             "Quarantine the hashed file, submit for malware analysis, "
             "and hunt the hash across the environment."
         )
+
+    history = context.get("historical_correlation") or {}
+    if history.get("match_count"):
+        actions.append(
+            "Correlate with prior alerts sharing the same hash, IP, "
+            "or user and expand the investigation scope accordingly."
+        )
+
+    yara = context.get("yara_suggestions") or {}
+    if yara.get("applicable"):
+        actions.append(
+            "Scan the sample using organization YARA rules, submit "
+            "for malware analysis, and hunt the file hash across "
+            "the environment."
+        )
+        if yara.get("draft_rule_count"):
+            actions.append(
+                "If a draft YARA rule was provided, validate it in a "
+                "lab against known-good binaries before deploying."
+            )
 
     if disposition in ("suspicious", "malicious"):
         actions.extend([
@@ -383,6 +440,23 @@ def rule_based_summary(context):
         disposition = "suspicious"
         risk_level = "high"
 
+    history = context.get("historical_correlation") or {}
+    if history.get("match_count"):
+        findings.append(
+            f"Historical correlation: {history.get('summary')}."
+        )
+        if disposition == "likely_benign":
+            disposition = "suspicious"
+            if risk_level == "low":
+                risk_level = "medium"
+
+    yara = context.get("yara_suggestions") or {}
+    if yara.get("applicable"):
+        findings.append(
+            "YARA scanning is recommended for this malware/file-"
+            "related alert."
+        )
+
     if not any([
         children, files, network, dns,
         persistence.get("registry_count"),
@@ -393,6 +467,7 @@ def rule_based_summary(context):
         isinstance(vt, dict) and (
             vt.get("malicious") or vt.get("suspicious")
         ),
+        history.get("match_count"),
     ]):
         findings.append(
             "No strong supporting telemetry for persistence, "
@@ -521,6 +596,8 @@ def summarize_alert(
     risk=None,
     mitre=None,
     timeline=None,
+    history=None,
+    yara=None,
 ):
     """
     Build an analyst summary from alert + TI + investigation.
@@ -534,6 +611,8 @@ def summarize_alert(
         risk=risk,
         mitre=mitre,
         timeline=timeline,
+        history=history,
+        yara=yara,
     )
 
     if OPENAI_API_KEY:

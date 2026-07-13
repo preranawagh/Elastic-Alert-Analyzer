@@ -15,8 +15,10 @@ from timeline import build_timeline
 from scoring import calculate_risk_score
 from mitre import map_mitre
 from llm_summary import summarize_alert
+from yara_suggest import suggest_yara_rules
+from history import find_related_alerts, extract_history_fields, record_alert_history
 from report import generate_soc_report, save_combined_report
-from config import SAVE_REPORTS, REPORTS_DIR
+from config import SAVE_REPORTS, REPORTS_DIR, HISTORY_LOOKBACK_DAYS
 
 response = es.search(
     index=".internal.alerts-security.alerts-default-000001",
@@ -45,8 +47,18 @@ for index, alert in enumerate(hits, start=1):
     try:
         enrichment = enrich_alert(src)
         investigation = investigate_alert(src)
+        yara = suggest_yara_rules(
+            src, enrichment, investigation
+        )
+        history = find_related_alerts(
+            src,
+            enrichment=enrichment,
+            lookback_days=HISTORY_LOOKBACK_DAYS,
+        )
         timeline = build_timeline(src, investigation)
-        risk = calculate_risk_score(src, enrichment, investigation)
+        risk = calculate_risk_score(
+            src, enrichment, investigation, history=history
+        )
         mitre = map_mitre(
             src, enrichment, investigation, risk=risk
         )
@@ -57,6 +69,8 @@ for index, alert in enumerate(hits, start=1):
             risk=risk,
             mitre=mitre,
             timeline=timeline,
+            history=history,
+            yara=yara,
         )
         report = generate_soc_report(
             src,
@@ -66,6 +80,13 @@ for index, alert in enumerate(hits, start=1):
             timeline=timeline,
             risk=risk,
             mitre=mitre,
+            yara=yara,
+            history=history,
+        )
+        record_alert_history(
+            extract_history_fields(
+                src, enrichment=enrichment, report=report
+            )
         )
         all_reports.append(report)
         print(

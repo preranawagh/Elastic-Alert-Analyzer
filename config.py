@@ -37,3 +37,6 @@ SAVE_REPORTS = os.getenv("SAVE_REPORTS", "true").lower() in (
 # IOC cache (SQLite)
 CACHE_DB_PATH = os.getenv("CACHE_DB_PATH", "cache.db")
 CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))
+
+# Historical correlation lookback (days) for hash/IP/user matches
+HISTORY_LOOKBACK_DAYS = int(os.getenv("HISTORY_LOOKBACK_DAYS", "30"))

@@ -113,6 +113,8 @@ def build_report(
     timeline=None,
     risk=None,
     mitre=None,
+    yara=None,
+    history=None,
 ):
     """Assemble a structured SOC investigation report."""
     inv = investigation or {}
@@ -211,6 +213,20 @@ def build_report(
         "attack_chain": _attack_chain(inv, timeline),
         "risk": risk or {},
         "mitre": mitre or {},
+        "yara_suggestions": yara if yara is not None else {
+            "applicable": False,
+            "strength": "none",
+            "recommendations": [],
+            "draft_rules": [],
+            "rule_count": 0,
+            "suggestions": [],
+            "note": "YARA not evaluated",
+        },
+        "historical_correlation": history or {
+            "match_count": 0,
+            "summary": "No historical correlation run",
+            "matches": [],
+        },
         "summary": {
             "provider": (summary or {}).get("provider"),
             "model": (summary or {}).get("model"),
@@ -354,6 +370,63 @@ def render_alert_section(report, alert_number):
         f"- **MD5:** {alert.get('md5')}",
         f"- **Public IPs:** {iocs.get('public_ips')}",
         f"- **Private IPs:** {iocs.get('private_ips')}",
+        "",
+        "## Historical Correlation",
+        "",
+    ])
+
+    history = report.get("historical_correlation") or {}
+    lines.append(f"- **Summary:** {history.get('summary')}")
+    lines.append(
+        f"- **Lookback:** {history.get('lookback_days')} day(s)"
+    )
+    lines.append(f"- **Matches:** {history.get('match_count', 0)}")
+    for match in (history.get("matches") or [])[:8]:
+        lines.append(
+            f"- [{match.get('matched_on')}] "
+            f"{match.get('timestamp')} | {match.get('rule')} | "
+            f"host={match.get('host')} user={match.get('user')} "
+            f"risk={match.get('overall_risk')}"
+        )
+    if not history.get("matches"):
+        lines.append("- No prior alerts with same hash/IP/user")
+
+    yara = report.get("yara_suggestions") or {}
+    if yara.get("applicable"):
+        lines.extend([
+            "",
+            "## YARA Recommendation",
+            "",
+            f"- **Why:** {yara.get('note')}",
+        ])
+        for reason in yara.get("reasons") or []:
+            lines.append(f"- **Evidence:** {reason}")
+        lines.append("")
+        lines.append("### Recommended actions")
+        lines.append("")
+        for item in yara.get("recommendations") or []:
+            lines.append(f"- {item}")
+        draft_rules = (
+            yara.get("draft_rules") or yara.get("suggestions") or []
+        )
+        if draft_rules:
+            lines.extend([
+                "",
+                "### Optional draft rule "
+                "(validate in lab before use)",
+                "",
+            ])
+            for item in draft_rules:
+                lines.append(f"#### {item.get('name')}")
+                lines.append("")
+                lines.append(f"- {item.get('rationale')}")
+                lines.append("")
+                lines.append("```yara")
+                lines.append((item.get("rule") or "").rstrip())
+                lines.append("```")
+                lines.append("")
+
+    lines.extend([
         "",
         "## Investigation Findings",
         "",
@@ -725,6 +798,8 @@ def _render_alert_html(report, alert_number):
     mitre = report.get("mitre") or {}
     timeline = report.get("timeline") or {}
     tree = (inv.get("process_tree") or {}).get("display")
+    yara = report.get("yara_suggestions") or {}
+    history = report.get("historical_correlation") or {}
 
     elastic_sev = risk.get("elastic_severity") or alert.get("severity")
     overall = risk.get("overall_risk") or "UNKNOWN"
@@ -869,6 +944,68 @@ def _render_alert_html(report, alert_number):
         timeline_rows,
     )
 
+    history_rows = []
+    for match in (history.get("matches") or [])[:12]:
+        history_rows.append([
+            _html_esc(match.get("matched_on")),
+            _html_esc(match.get("timestamp")),
+            _html_esc(match.get("rule")),
+            _html_esc(match.get("host")),
+            _html_esc(match.get("user")),
+            _badge(match.get("overall_risk") or "-"),
+        ])
+    history_html = (
+        f"<p>{_html_esc(history.get('summary'))}</p>"
+        f"<p class='muted'>Lookback: "
+        f"{_html_esc(history.get('lookback_days'))} day(s) · "
+        f"Matches: {_html_esc(history.get('match_count', 0))}</p>"
+        + _data_table(
+            ["Matched On", "Timestamp", "Rule", "Host", "User", "Risk"],
+            history_rows,
+        )
+    )
+
+    yara_parts = []
+    if yara.get("applicable"):
+        yara_parts.append(f"<p>{_html_esc(yara.get('note'))}</p>")
+        reason_items = "".join(
+            f"<li>{_html_esc(r)}</li>"
+            for r in (yara.get("reasons") or [])
+        )
+        if reason_items:
+            yara_parts.append(
+                f"<h3>Evidence</h3><ul class='clean'>{reason_items}</ul>"
+            )
+        action_items = "".join(
+            f"<li>{_html_esc(r)}</li>"
+            for r in (yara.get("recommendations") or [])
+        )
+        yara_parts.append(
+            "<h3>Recommended actions</h3>"
+            f"<ul class='clean'>{action_items or '<li class=\"muted\">None</li>'}</ul>"
+        )
+        draft_rules = (
+            yara.get("draft_rules") or yara.get("suggestions") or []
+        )
+        if draft_rules:
+            yara_parts.append(
+                "<h3>Optional draft rule "
+                "(validate in lab before use)</h3>"
+            )
+            for item in draft_rules:
+                yara_parts.append(
+                    f"<h4>{_html_esc(item.get('name'))}</h4>"
+                )
+                yara_parts.append(
+                    f"<p class='muted'>"
+                    f"{_html_esc(item.get('rationale'))}</p>"
+                )
+                yara_parts.append(
+                    f'<div class="pre">'
+                    f'{_html_esc(item.get("rule"))}</div>'
+                )
+    yara_html = "\n".join(yara_parts)
+
     findings = "".join(
         f"<li>{_html_esc(item)}</li>"
         for item in (summary.get("key_findings") or [])
@@ -913,6 +1050,12 @@ def _render_alert_html(report, alert_number):
         _section("Attack Chain / Process Tree", tree_html),
         _section("Threat Intelligence", ti_table),
         _section("IOC Summary", ioc_table),
+        _section("Historical Correlation", history_html),
+        *(
+            [_section("YARA Recommendation", yara_html)]
+            if yara.get("applicable") and yara_html
+            else []
+        ),
         _section("Investigation Findings", inv_table),
         _section(
             "Timeline",
@@ -1131,6 +1274,8 @@ def generate_soc_report(
     timeline=None,
     risk=None,
     mitre=None,
+    yara=None,
+    history=None,
 ):
     return build_report(
         alert,
@@ -1140,4 +1285,6 @@ def generate_soc_report(
         timeline=timeline,
         risk=risk,
         mitre=mitre,
+        yara=yara,
+        history=history,
     )
