@@ -90,8 +90,13 @@ if SAVE_REPORTS:
     )
     print()
     print("Combined SOC report saved:")
-    print(f"  Markdown : {saved_paths['markdown']}")
-    print(f"  JSON     : {saved_paths['json']}")
+    print(f"  Markdown : {saved_paths.get('markdown')}")
+    print(f"  JSON     : {saved_paths.get('json')}")
+    print(f"  HTML     : {saved_paths.get('html')}")
+    if saved_paths.get("pdf"):
+        print(f"  PDF      : {saved_paths.get('pdf')}")
+    elif saved_paths.get("pdf_error"):
+        print(f"  PDF      : skipped ({saved_paths.get('pdf_error')})")
     print(f"  Alerts   : {len(all_reports)}")
     if failures:
         print(f"  Failed   : {failures}")

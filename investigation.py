@@ -429,7 +429,7 @@ def investigate_process(alert, window_minutes=None):
             process_events = process_hits
 
     # Simple tree: parent -> alert process -> children
-    tree = {
+    tree_base = {
         "parent": parent,
         "process": {
             "name": ctx["process_name"],
@@ -440,14 +440,13 @@ def investigate_process(alert, window_minutes=None):
             "user": ctx["user"],
         },
         "children": children,
-        "display": format_process_tree_text({
-            "parent": parent,
-            "process": {
-                "name": ctx["process_name"],
-                "pid": ctx["process_pid"],
-            },
-            "children": children,
-        }),
+    }
+    tree = {
+        **tree_base,
+        "display": format_process_tree_text(tree_base, ascii_mode=False),
+        "display_ascii": format_process_tree_text(
+            tree_base, ascii_mode=True
+        ),
     }
 
     return {
@@ -458,14 +457,21 @@ def investigate_process(alert, window_minutes=None):
     }
 
 
-def format_process_tree_text(tree):
+def format_process_tree_text(tree, ascii_mode=False):
     """
-    Render a readable process tree:
+    Render a readable process tree.
 
-    explorer.exe
-    └── Code.exe
-        └── powershell.exe
-            └── python.exe
+    Unicode (HTML):
+      explorer.exe
+      └── Code.exe
+          └── powershell.exe
+
+    ASCII (PDF-safe):
+      explorer.exe (pid=1234)
+        |
+        +--> Code.exe (pid=5678)
+               |
+               +--> powershell.exe (pid=9012)
     """
     tree = tree or {}
     parent = tree.get("parent") or {}
@@ -482,19 +488,40 @@ def format_process_tree_text(tree):
     lines = []
     if parent and parent.get("name"):
         lines.append(label(parent))
-        lines.append(f"└── {label(process)}")
-        prefix = "    "
+        if ascii_mode:
+            lines.append("  |")
+            lines.append(f"  +--> {label(process)}")
+            child_stem = "         |"
+            child_branch = "         +--> "
+        else:
+            lines.append(f"└── {label(process)}")
+            child_stem = None
+            child_branch = "    "
     else:
         lines.append(label(process))
-        prefix = ""
+        if ascii_mode:
+            child_stem = "  |"
+            child_branch = "  +--> "
+        else:
+            child_stem = None
+            child_branch = ""
 
     valid_children = [
         c for c in children
         if isinstance(c, dict) and not c.get("_error")
     ]
     for index, child in enumerate(valid_children[:10]):
-        connector = "└──" if index == len(valid_children[:10]) - 1 else "├──"
-        lines.append(f"{prefix}{connector} {label(child)}")
+        if ascii_mode:
+            lines.append(child_stem)
+            lines.append(f"{child_branch}{label(child)}")
+        else:
+            prefix = child_branch
+            connector = (
+                "└──"
+                if index == len(valid_children[:10]) - 1
+                else "├──"
+            )
+            lines.append(f"{prefix}{connector} {label(child)}")
 
     return "\n".join(lines) if lines else "No process tree data"
 

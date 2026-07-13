@@ -1,3 +1,4 @@
+import html
 import json
 import os
 from datetime import datetime, timezone
@@ -483,7 +484,550 @@ def render_combined_markdown(reports, generated_at=None):
     return "\n".join(lines)
 
 
+# ======================================================
+# HTML / PDF export
+# ======================================================
+
+def _html_esc(value):
+    if value is None:
+        return "-"
+    if isinstance(value, (list, dict)):
+        return html.escape(str(value))
+    text = str(value).strip()
+    return html.escape(text) if text else "-"
+
+
+def _severity_class(value):
+    text = as_text(value).lower()
+    if text in ("critical", "crit"):
+        return "sev-critical"
+    if text in ("high",):
+        return "sev-high"
+    if text in ("medium", "med", "moderate"):
+        return "sev-medium"
+    if text in ("low", "informational", "info"):
+        return "sev-low"
+    if text in ("suspicious", "malicious"):
+        return "sev-high"
+    if text in ("likely_benign", "benign"):
+        return "sev-low"
+    return "sev-unknown"
+
+
+def _badge(value, kind=None):
+    css = kind or _severity_class(value)
+    return (
+        f'<span class="badge {css}">'
+        f"{_html_esc(value)}</span>"
+    )
+
+
+def _kv_table(rows):
+    lines = [
+        '<table class="kv">',
+        "<thead><tr><th>Field</th><th>Value</th></tr></thead>",
+        "<tbody>",
+    ]
+    for key, value in rows:
+        lines.append(
+            f"<tr><td class='k'>{_html_esc(key)}</td>"
+            f"<td class='v'>{value}</td></tr>"
+        )
+    lines.extend(["</tbody></table>"])
+    return "\n".join(lines)
+
+
+def _data_table(headers, rows):
+    head = "".join(f"<th>{_html_esc(h)}</th>" for h in headers)
+    body = []
+    for row in rows:
+        cells = "".join(f"<td>{c}</td>" for c in row)
+        body.append(f"<tr>{cells}</tr>")
+    if not body:
+        body.append(
+            f"<tr><td colspan='{len(headers)}'>No data</td></tr>"
+        )
+    return (
+        '<table class="data">'
+        f"<thead><tr>{head}</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody>"
+        "</table>"
+    )
+
+
+def _section(title, body_html, level=2):
+    tag = f"h{level}"
+    return (
+        f'<section class="section">'
+        f"<{tag}>{_html_esc(title)}</{tag}>"
+        f"{body_html}"
+        f"</section>"
+    )
+
+
+def _report_css(for_pdf=False):
+    """Browser HTML stylesheet. PDF uses ReportLab (not HTML/CSS)."""
+    _ = for_pdf
+    return """
+:root {
+  --bg: #f5f7fb;
+  --card: #ffffff;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #0f766e;
+  --critical: #b91c1c;
+  --high: #c2410c;
+  --medium: #a16207;
+  --low: #15803d;
+  --unknown: #4b5563;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  line-height: 1.45;
+  font-size: 13px;
+}
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+.cover {
+  background: linear-gradient(135deg, #0f766e, #115e59 55%, #134e4a);
+  color: #fff;
+  border-radius: 14px;
+  padding: 28px 30px;
+  margin-bottom: 22px;
+}
+.cover h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  letter-spacing: 0.2px;
+}
+.cover .meta { opacity: 0.92; font-size: 13px; }
+.alert-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px 10px;
+  margin: 0 0 28px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  page-break-inside: avoid;
+}
+.alert-card h1 {
+  margin: 0 0 12px;
+  font-size: 20px;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 8px;
+}
+.section {
+  margin: 16px 0 18px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.section:first-of-type { border-top: none; }
+.section h2 {
+  margin: 12px 0 8px;
+  font-size: 15px;
+  color: #0f172a;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.section h3 {
+  margin: 10px 0 6px;
+  font-size: 13px;
+  color: #334155;
+}
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #fff;
+  vertical-align: middle;
+}
+.sev-critical { background: var(--critical); }
+.sev-high { background: var(--high); }
+.sev-medium { background: var(--medium); }
+.sev-low { background: var(--low); }
+.sev-unknown { background: var(--unknown); }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0 10px;
+  background: #fff;
+}
+table.kv td, table.kv th,
+table.data td, table.data th {
+  border: 1px solid var(--border);
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+table th {
+  background: #f1f5f9;
+  font-size: 12px;
+  color: #334155;
+}
+table.kv td.k {
+  width: 28%;
+  font-weight: 600;
+  background: #f8fafc;
+  color: #334155;
+}
+.pre {
+  white-space: pre-wrap;
+  font-family: Consolas, "Courier New", monospace;
+  background: #0b1220;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.summary-box {
+  background: #ecfeff;
+  border-left: 4px solid var(--accent);
+  padding: 10px 12px;
+  border-radius: 0 8px 8px 0;
+  margin: 6px 0 10px;
+}
+.muted { color: var(--muted); }
+ul.clean { margin: 6px 0 8px 18px; padding: 0; }
+ul.clean li { margin: 3px 0; }
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .alert-card {
+    box-shadow: none;
+    page-break-after: always;
+  }
+  .cover { border-radius: 0; }
+}
+"""
+
+
+def _render_alert_html(report, alert_number):
+    alert = report.get("alert") or {}
+    risk = report.get("risk") or {}
+    summary = report.get("summary") or {}
+    ti = report.get("threat_intelligence") or {}
+    iocs = ti.get("iocs") or {}
+    inv = report.get("investigation") or {}
+    counts = inv.get("counts") or {}
+    persistence = inv.get("persistence") or {}
+    mitre = report.get("mitre") or {}
+    timeline = report.get("timeline") or {}
+    tree = (inv.get("process_tree") or {}).get("display")
+
+    elastic_sev = risk.get("elastic_severity") or alert.get("severity")
+    overall = risk.get("overall_risk") or "UNKNOWN"
+    disposition = summary.get("disposition") or "-"
+
+    overview = _kv_table([
+        ("Rule", _html_esc(alert.get("rule"))),
+        ("Elastic Severity", _badge(elastic_sev)),
+        ("Overall Risk", _badge(overall)),
+        ("Risk Score", _html_esc(risk.get("risk_score_label"))),
+        ("Recommendation", _html_esc(risk.get("recommendation"))),
+        ("Disposition", _badge(disposition)),
+        ("Timestamp", _html_esc(alert.get("timestamp"))),
+        ("Host", _html_esc(alert.get("host"))),
+        ("User", _html_esc(alert.get("user"))),
+        (
+            "Process",
+            _html_esc(
+                f"{alert.get('process')} "
+                f"(pid={alert.get('process_pid')})"
+            ),
+        ),
+        ("Parent", _html_esc(alert.get("parent_process"))),
+        (
+            "Command Line",
+            f"<code>{_html_esc(alert.get('command_line'))}</code>",
+        ),
+        ("Elastic Reason", _html_esc(alert.get("reason"))),
+    ])
+
+    score_reasons = "".join(
+        f"<li>{_html_esc(r)}</li>" for r in (risk.get("reasons") or [])
+    ) or "<li class='muted'>No reasons</li>"
+
+    mitre_rows = []
+    for item in mitre.get("techniques") or []:
+        mitre_rows.append([
+            _html_esc(item.get("id")),
+            _html_esc(item.get("tactic")),
+            _html_esc(item.get("name")),
+            _html_esc(item.get("evidence")),
+        ])
+    mitre_table = _data_table(
+        ["ID", "Tactic", "Technique", "Evidence"],
+        mitre_rows,
+    )
+
+    ioc_table = _kv_table([
+        (
+            "Lookup IP",
+            _html_esc(iocs.get("lookup_ip") or alert.get("lookup_ip")),
+        ),
+        (
+            "Source IP",
+            _html_esc(iocs.get("source_ip") or alert.get("source_ip")),
+        ),
+        (
+            "Destination IP",
+            _html_esc(
+                iocs.get("destination_ip") or alert.get("destination_ip")
+            ),
+        ),
+        ("Related IPs", _html_esc(iocs.get("related_ips"))),
+        (
+            "Domain",
+            _html_esc(iocs.get("domain") or alert.get("domain")),
+        ),
+        ("URL", _html_esc(iocs.get("url") or alert.get("url"))),
+        ("File Name", _html_esc(alert.get("file_name"))),
+        ("File Path", _html_esc(alert.get("file_path"))),
+        ("SHA256", f"<code>{_html_esc(alert.get('sha256'))}</code>"),
+        ("SHA1", f"<code>{_html_esc(alert.get('sha1'))}</code>"),
+        ("MD5", f"<code>{_html_esc(alert.get('md5'))}</code>"),
+        ("Public IPs", _html_esc(iocs.get("public_ips"))),
+        ("Private IPs", _html_esc(iocs.get("private_ips"))),
+    ])
+
+    ti_table = _kv_table([
+        ("VirusTotal (best)", _html_esc(ti.get("virustotal"))),
+        ("VirusTotal IP", _html_esc(ti.get("virustotal_ip"))),
+        ("VirusTotal Hash", _html_esc(ti.get("virustotal_hash"))),
+        ("VirusTotal Domain", _html_esc(ti.get("virustotal_domain"))),
+        ("VirusTotal URL", _html_esc(ti.get("virustotal_url"))),
+        ("AbuseIPDB", _html_esc(ti.get("abuseipdb"))),
+        ("Shodan", _html_esc(ti.get("shodan"))),
+        ("Hybrid Analysis", _html_esc(ti.get("hybrid_analysis"))),
+    ])
+
+    inv_table = _data_table(
+        ["Signal", "Count"],
+        [
+            ["Child Processes", _html_esc(counts.get("child_processes"))],
+            ["File Creations", _html_esc(counts.get("file_creations"))],
+            [
+                "File Modifications",
+                _html_esc(counts.get("file_modifications")),
+            ],
+            ["Registry Changes", _html_esc(counts.get("registry_changes"))],
+            [
+                "Network Connections",
+                _html_esc(counts.get("network_connections")),
+            ],
+            ["DNS Events", _html_esc(counts.get("dns_events"))],
+            [
+                "Auth Events",
+                _html_esc(counts.get("authentication_events")),
+            ],
+            ["Services", _html_esc(counts.get("services"))],
+            ["Scheduled Tasks", _html_esc(counts.get("scheduled_tasks"))],
+            [
+                "Persistence Registry",
+                _html_esc(
+                    _safe_len(persistence.get("registry_persistence"))
+                ),
+            ],
+            [
+                "Startup Folder",
+                _html_esc(_safe_len(persistence.get("startup_folder"))),
+            ],
+            [
+                "WMI Persistence",
+                _html_esc(_safe_len(persistence.get("wmi_persistence"))),
+            ],
+        ],
+    )
+
+    tree_html = (
+        f'<div class="pre">{_html_esc(tree)}</div>'
+        if tree else "<p class='muted'>No process tree</p>"
+    )
+
+    timeline_rows = []
+    for event in (timeline.get("events") or [])[:25]:
+        timeline_rows.append([
+            _html_esc(event.get("timestamp")),
+            _html_esc(event.get("category")),
+            _html_esc(event.get("action")),
+            _html_esc(event.get("detail")),
+        ])
+    timeline_table = _data_table(
+        ["Timestamp", "Category", "Action", "Detail"],
+        timeline_rows,
+    )
+
+    findings = "".join(
+        f"<li>{_html_esc(item)}</li>"
+        for item in (summary.get("key_findings") or [])
+    ) or "<li class='muted'>No findings</li>"
+
+    actions = "".join(
+        f"<li>{_html_esc(item)}</li>"
+        for item in (summary.get("recommended_actions") or [])
+    ) or "<li class='muted'>No actions</li>"
+
+    parts = [
+        f'<article class="alert-card" id="alert-{alert_number}">',
+        f"<h1>{alert_number}. {_html_esc(alert.get('rule') or 'Alert')}</h1>",
+        _section(
+            "Executive Summary",
+            f"<div class='summary-box'>"
+            f"{_html_esc(summary.get('executive_summary'))}"
+            f"</div>"
+            f"<p>Disposition: {_badge(disposition)} &nbsp; "
+            f"Risk: {_badge(overall)} "
+            f"({_html_esc(risk.get('risk_score_label'))})</p>",
+        ),
+        _section("Alert Overview", overview),
+        _section(
+            "Risk Score",
+            _kv_table([
+                ("Elastic Severity", _badge(elastic_sev)),
+                (
+                    "Computed Score",
+                    _html_esc(risk.get("risk_score_label")),
+                ),
+                ("Overall Risk", _badge(overall)),
+                (
+                    "Recommendation",
+                    _html_esc(risk.get("recommendation")),
+                ),
+            ])
+            + "<h3>Score Reasons</h3>"
+            + f"<ul class='clean'>{score_reasons}</ul>",
+        ),
+        _section("MITRE ATT&CK", mitre_table),
+        _section("Attack Chain / Process Tree", tree_html),
+        _section("Threat Intelligence", ti_table),
+        _section("IOC Summary", ioc_table),
+        _section("Investigation Findings", inv_table),
+        _section(
+            "Timeline",
+            f"<p class='muted'>Showing up to 25 of "
+            f"{_html_esc(timeline.get('event_count', 0))} events</p>"
+            + timeline_table,
+        ),
+        _section(
+            "Analyst Assessment",
+            f"<p>Provider: <strong>"
+            f"{_html_esc(summary.get('provider'))}</strong>"
+            + (
+                f" ({_html_esc(summary.get('model'))})"
+                if summary.get("model")
+                else ""
+            )
+            + "</p>"
+            + "<h3>Key Findings</h3>"
+            + f"<ul class='clean'>{findings}</ul>",
+        ),
+        _section(
+            "Recommended Actions",
+            f"<ul class='clean'>{actions}</ul>",
+        ),
+        "</article>",
+    ]
+    return "\n".join(parts)
+
+
+def render_combined_html(reports, generated_at=None, for_pdf=False):
+    generated_at = generated_at or datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    toc_rows = []
+    for index, report in enumerate(reports, start=1):
+        alert = report.get("alert") or {}
+        risk = report.get("risk") or {}
+        toc_rows.append([
+            f"<a href='#alert-{index}'>{index}</a>",
+            _html_esc(alert.get("rule")),
+            _badge(
+                risk.get("elastic_severity") or alert.get("severity")
+            ),
+            _badge(risk.get("overall_risk")),
+            _html_esc(risk.get("risk_score_label")),
+            _html_esc(alert.get("host")),
+        ])
+
+    toc = _data_table(
+        ["#", "Rule", "Elastic Sev", "Risk", "Score", "Host"],
+        toc_rows,
+    )
+
+    alerts_html = "\n".join(
+        _render_alert_html(report, index)
+        for index, report in enumerate(reports, start=1)
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SOC Investigation Report</title>
+  <style>{_report_css(for_pdf=for_pdf)}</style>
+</head>
+<body>
+  <div class="page">
+    <header class="cover">
+      <h1>SOC Investigation Report</h1>
+      <div class="meta">
+        Generated: {_html_esc(generated_at)}<br/>
+        Alert Count: {len(reports)}
+      </div>
+    </header>
+
+    <section class="alert-card">
+      <h1>Report Index</h1>
+      {toc}
+    </section>
+
+    {alerts_html}
+  </div>
+</body>
+</html>
+"""
+
+
+def save_html_report(
+    reports, output_path, generated_at=None, for_pdf=False
+):
+    html_content = render_combined_html(
+        reports,
+        generated_at=generated_at,
+        for_pdf=for_pdf,
+    )
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(html_content)
+    return html_content
+
+
+def save_pdf_report(reports, output_path, generated_at=None):
+    """Write PDF via ReportLab. Returns (ok, error)."""
+    from pdf_export import build_pdf_report
+
+    return build_pdf_report(
+        reports, output_path, generated_at=generated_at
+    )
+
+
 def save_combined_report(reports, output_dir=None):
+    """
+    Save combined report as Markdown, JSON, HTML, and PDF.
+    PDF is built with ReportLab (wrapping, colors, ASCII trees).
+    """
     output_dir = output_dir or REPORTS_DIR
     os.makedirs(output_dir, exist_ok=True)
 
@@ -493,6 +1037,8 @@ def save_combined_report(reports, output_dir=None):
 
     md_path = os.path.join(output_dir, f"{base}.md")
     json_path = os.path.join(output_dir, f"{base}.json")
+    html_path = os.path.join(output_dir, f"{base}.html")
+    pdf_path = os.path.join(output_dir, f"{base}.pdf")
 
     combined = {
         "generated_at": generated_at,
@@ -517,10 +1063,30 @@ def save_combined_report(reports, output_dir=None):
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(combined, handle, indent=2, default=str)
 
-    return {
+    save_html_report(
+        reports,
+        html_path,
+        generated_at=generated_at,
+        for_pdf=False,
+    )
+
+    pdf_ok, pdf_error = save_pdf_report(
+        reports, pdf_path, generated_at=generated_at
+    )
+
+    result = {
         "markdown": md_path,
         "json": json_path,
+        "html": html_path,
     }
+
+    if pdf_ok:
+        result["pdf"] = pdf_path
+    else:
+        result["pdf"] = None
+        result["pdf_error"] = pdf_error
+
+    return result
 
 
 def print_report(report, alert_number=None):
