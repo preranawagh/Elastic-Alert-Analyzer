@@ -1,6 +1,5 @@
 import os
 import base64
-import requests
 
 from dotenv import load_dotenv
 
@@ -12,6 +11,7 @@ from ecs_utils import (
     is_private_ip,
     pick_public_ip,
 )
+from retry_utils import http_request_with_retry
 
 load_dotenv()
 
@@ -151,8 +151,10 @@ def primary_hash(iocs):
 def _virustotal_ip_api(ip):
     url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
     headers = {"x-apikey": VT_API_KEY}
-    response = requests.get(url, headers=headers, timeout=30)
-    if response.status_code != 200:
+    response = http_request_with_retry(
+        "GET", url, "VirusTotal", headers=headers
+    )
+    if response is None:
         return None
     return response.json()
 
@@ -160,8 +162,10 @@ def _virustotal_ip_api(ip):
 def _virustotal_hash_api(file_hash):
     url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
     headers = {"x-apikey": VT_API_KEY}
-    response = requests.get(url, headers=headers, timeout=30)
-    if response.status_code != 200:
+    response = http_request_with_retry(
+        "GET", url, "VirusTotal", headers=headers
+    )
+    if response is None:
         return None
     return response.json()
 
@@ -169,8 +173,10 @@ def _virustotal_hash_api(file_hash):
 def _virustotal_domain_api(domain):
     url = f"https://www.virustotal.com/api/v3/domains/{domain}"
     headers = {"x-apikey": VT_API_KEY}
-    response = requests.get(url, headers=headers, timeout=30)
-    if response.status_code != 200:
+    response = http_request_with_retry(
+        "GET", url, "VirusTotal", headers=headers
+    )
+    if response is None:
         return None
     return response.json()
 
@@ -182,8 +188,10 @@ def _virustotal_url_api(url_value):
     ).decode().strip("=")
     url = f"https://www.virustotal.com/api/v3/urls/{url_id}"
     headers = {"x-apikey": VT_API_KEY}
-    response = requests.get(url, headers=headers, timeout=30)
-    if response.status_code != 200:
+    response = http_request_with_retry(
+        "GET", url, "VirusTotal", headers=headers
+    )
+    if response is None:
         return None
     return response.json()
 
@@ -243,10 +251,14 @@ def _abuseipdb_api(ip):
         "Accept": "application/json",
     }
     params = {"ipAddress": ip, "maxAgeInDays": 90}
-    response = requests.get(
-        url, headers=headers, params=params, timeout=30
+    response = http_request_with_retry(
+        "GET",
+        url,
+        "AbuseIPDB",
+        headers=headers,
+        params=params,
     )
-    if response.status_code != 200:
+    if response is None:
         return None
     return response.json()
 
@@ -264,8 +276,8 @@ def abuseipdb_lookup(ip):
 
 def _shodan_api(ip):
     url = f"https://api.shodan.io/shodan/host/{ip}?key={SHODAN_API_KEY}"
-    response = requests.get(url, timeout=30)
-    if response.status_code != 200:
+    response = http_request_with_retry("GET", url, "Shodan")
+    if response is None:
         return None
     return response.json()
 
@@ -288,13 +300,14 @@ def _hybrid_analysis_api(hash_value):
         "accept": "application/json",
         "user-agent": "Falcon Sandbox",
     }
-    response = requests.post(
+    response = http_request_with_retry(
+        "POST",
         url,
+        "Hybrid Analysis",
         headers=headers,
         data={"hash": hash_value},
-        timeout=30,
     )
-    if response.status_code != 200:
+    if response is None:
         return None
     payload = response.json()
     if isinstance(payload, list) and not payload:

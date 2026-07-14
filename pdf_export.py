@@ -65,10 +65,20 @@ def _esc(text):
     )
 
 
-def build_pdf_report(reports, output_path, generated_at=None):
+def build_pdf_report(
+    reports,
+    output_path,
+    generated_at=None,
+    *,
+    report_source=None,
+    alert_count=None,
+):
     """
     Build a formatted SOC PDF with ReportLab.
     Returns (ok, error).
+
+    Pass report_source (callable returning a fresh iterator of
+    (index, report) pairs) with alert_count for batched/staged builds.
     """
     try:
         from reportlab.lib import colors
@@ -96,6 +106,23 @@ def build_pdf_report(reports, output_path, generated_at=None):
     generated_at = generated_at or datetime.now(
         timezone.utc
     ).isoformat()
+
+    if report_source is not None:
+        if alert_count is None:
+            return False, "alert_count is required when using report_source"
+        total_alerts = alert_count
+
+        def iter_pairs():
+            return report_source()
+
+    else:
+        total_alerts = len(reports)
+
+        def iter_pairs():
+            return (
+                (index, report)
+                for index, report in enumerate(reports, start=1)
+            )
 
     try:
         styles = getSampleStyleSheet()
@@ -341,7 +368,7 @@ def build_pdf_report(reports, output_path, generated_at=None):
                 )],
                 [Paragraph(
                     f"Generated: {_esc(generated_at)}<br/>"
-                    f"Alert Count: {len(reports)}",
+                    f"Alert Count: {total_alerts}",
                     styles["CoverMeta"],
                 )],
             ],
@@ -361,7 +388,7 @@ def build_pdf_report(reports, output_path, generated_at=None):
 
         story.append(Paragraph("Report Index", styles["AlertTitle"]))
         toc_rows = []
-        for index, report in enumerate(reports, start=1):
+        for index, report in iter_pairs():
             alert = report.get("alert") or {}
             risk = report.get("risk") or {}
             toc_rows.append([
@@ -388,7 +415,7 @@ def build_pdf_report(reports, output_path, generated_at=None):
         ))
         story.append(PageBreak())
 
-        for index, report in enumerate(reports, start=1):
+        for index, report in iter_pairs():
             alert = report.get("alert") or {}
             risk = report.get("risk") or {}
             summary = report.get("summary") or {}
